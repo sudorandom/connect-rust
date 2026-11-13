@@ -16,7 +16,7 @@ use buffa::Message;
 use buffa_types::google::protobuf::Any;
 use connectrpc::client::{
     BoxFuture, CallOptions, ClientBody, ClientConfig, ClientTransport, call_bidi_stream,
-    call_client_stream, call_server_stream, call_unary, call_unary_get,
+    call_client_stream, call_server_stream, call_unary, call_unary_get, call_unary_query,
 };
 use connectrpc::error::{ConnectError, ErrorCode};
 use connectrpc::rustls;
@@ -292,7 +292,8 @@ async fn execute_request(req: &ClientCompatRequest) -> ExecResult {
         return ExecResult::Error("HTTP/3 not supported".to_string());
     }
 
-    // Connect GET: handled inside do_unary_call via req.use_get_http_method.
+    // Connect GET and QUERY: handled inside do_unary_call via
+    // req.use_get_http_method and req.use_query_http_method.
 
     // Validate cancel timing
     let cancel_before_close_send = if req.cancel.is_set() {
@@ -546,14 +547,21 @@ async fn do_unary_call(
     // Dispatch based on method to get correct types. Use GET if the request
     // asks for it (Connect protocol only — call_unary_get will error otherwise).
     let use_get = req.use_get_http_method;
+    let use_query = req.use_query_http_method;
 
-    // Macro: picks call_unary or call_unary_get based on use_get. Avoids
-    // duplicating the three match arms for the GET/POST choice. Each arm
+    // Macro: picks call_unary, call_unary_get or call_unary_query based on
+    // use_get and use_query. Avoids duplicating the three match arms for the
+    // GET/QUERY/POST choice. Each arm
     // passes the generated `*_SPEC` for its method, as a client.
     macro_rules! do_call {
         ($spec:expr, $req_ty:ty, $resp_view:ty, $request:expr) => {
             if use_get {
                 call_unary_get::<_, $req_ty, $resp_view>(
+                    &transport, &config, $spec, $request, options,
+                )
+                .await?
+            } else if use_query {
+                call_unary_query::<_, $req_ty, $resp_view>(
                     &transport, &config, $spec, $request, options,
                 )
                 .await?

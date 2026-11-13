@@ -123,6 +123,7 @@ fn build_request_info(
             ..Default::default()
         }],
         connect_get_info: Default::default(),
+        http_method: ctx.method().map(|method| method.as_str().to_owned()),
         ..Default::default()
     }
 }
@@ -488,6 +489,7 @@ impl ConformanceService for ConformanceServiceImpl {
                 })
                 .collect(),
             connect_get_info: Default::default(),
+            http_method: ctx.method().map(|method| method.as_str().to_owned()),
             ..Default::default()
         };
 

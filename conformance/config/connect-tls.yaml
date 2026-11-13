@@ -32,5 +32,6 @@ features:
     supports_tls_client_certs: true
     supports_trailers: true
     supports_connect_get: true
+    supports_connect_query: true
     supports_message_receive_limit: true
     supports_half_duplex_bidi_over_http1: true
