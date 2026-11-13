@@ -1264,6 +1264,17 @@ impl Server {
         self
     }
 
+    /// Enable or disable HTTP QUERY (RFC 10008) on the underlying service.
+    ///
+    /// Delegates to [`ConnectRpcService::with_http_query`]. QUERY is accepted
+    /// by default on every procedure that accepts Connect GET; pass `false`
+    /// to answer it with `405 Method Not Allowed`.
+    #[must_use]
+    pub fn with_http_query(mut self, enabled: bool) -> Self {
+        self.service = self.service.with_http_query(enabled);
+        self
+    }
+
     /// Append an [`Interceptor`](crate::Interceptor) to the chain on the
     /// underlying service.
     ///

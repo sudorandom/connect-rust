@@ -1,0 +1,10 @@
+kind: Added
+body: |-
+    **HTTP QUERY (RFC 10008) for idempotent unary Connect RPCs.**
+    `client::call_unary_query` is the QUERY sibling of `call_unary_get`: the
+    same request as `call_unary` with the method changed to `QUERY`, with no
+    URL size limit. The server accepts `QUERY` by default on every procedure
+    that accepts GET and answers `405` with an `Allow` header elsewhere;
+    `ConnectRpcService::with_http_query(false)` and `Server::with_http_query(false)`
+    turn it off. gRPC and gRPC-Web stay POST-only.
+time: 2026-11-13T12:00:00.000000000+00:00

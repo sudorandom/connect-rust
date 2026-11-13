@@ -64,7 +64,7 @@ impl From<StreamType> for MethodKind {
 /// `option idempotency_level` in its proto definition.
 ///
 /// Connect uses this to decide whether a unary call may be retried or sent
-/// over an HTTP `GET` request. Interceptors can use it to make the same
+/// over an HTTP `GET` or `QUERY` request. Interceptors can use it to make the same
 /// decision — for example, a retry interceptor should only retry calls that
 /// declare [`NoSideEffects`](IdempotencyLevel::NoSideEffects) or
 /// [`Idempotent`](IdempotencyLevel::Idempotent).
@@ -73,7 +73,7 @@ pub enum IdempotencyLevel {
     /// The method makes no idempotency guarantee. This is the proto default.
     #[default]
     Unknown,
-    /// The method is read-only and safe to retry or send via `GET`.
+    /// The method is read-only and safe to retry or send via `GET` or `QUERY`.
     NoSideEffects,
     /// The method may have side effects, but repeating it with the same
     /// request is safe.

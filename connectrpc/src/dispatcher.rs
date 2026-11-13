@@ -38,7 +38,7 @@ use crate::spec::Spec;
 pub struct MethodDescriptor {
     /// The kind of RPC method.
     pub kind: MethodKind,
-    /// Whether the method has no side effects and is eligible for Connect GET.
+    /// Whether the method has no side effects and is eligible for Connect GET and HTTP QUERY.
     ///
     /// Only meaningful for `MethodKind::Unary`. Always `false` for streaming.
     ///

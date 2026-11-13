@@ -463,7 +463,7 @@ client suites with `task conformance:test-client-*`.
 
 | RPC type | Status |
 |---|---|
-| Unary | ✓ (POST + GET for idempotent methods) |
+| Unary | ✓ (POST, plus GET and HTTP QUERY for idempotent methods) |
 | Server streaming | ✓ |
 | Client streaming | ✓ |
 | Bidirectional streaming | ✓ |

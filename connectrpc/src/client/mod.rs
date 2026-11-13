@@ -2126,7 +2126,99 @@ where
     RespView: MessageView<'static> + Send,
     RespView::Owned: buffa::Message + crate::codec::JsonDeserialize,
 {
-    check_client_spec(spec, StreamType::Unary, "call_unary")?;
+    call_unary_with_method(
+        transport,
+        config,
+        spec,
+        request,
+        options,
+        http::Method::POST,
+        "call_unary",
+    )
+    .await
+}
+
+/// Make an idempotent unary RPC call via HTTP QUERY (Connect protocol only).
+///
+/// HTTP QUERY (RFC 10008) is the safe, idempotent method that carries
+/// request content. The request is the same as the one [`call_unary`] sends
+/// with POST — same path, `Content-Type`, body, `Content-Encoding`,
+/// `Accept-Encoding`, timeout and metadata headers — with only the method
+/// changed to `QUERY`. None of the GET query parameters are used, and no
+/// size limit applies.
+///
+/// QUERY responses are cacheable, and the cache key includes the request
+/// content. For effective caching the encoded message should be
+/// deterministic; see [`call_unary_get`] for what that means per codec.
+///
+/// This is the QUERY sibling of [`call_unary_get`]: choosing it is the
+/// caller's decision, and `spec`'s
+/// [`idempotency_level`](Spec::idempotency_level) is **not** consulted. Use
+/// it only for methods declared `idempotency_level = NO_SIDE_EFFECTS`; the
+/// server answers `405 Method Not Allowed` for any other. A caller that also
+/// uses [`call_unary_get`] should send a request that fits in a URL with GET
+/// and use this function for the rest: QUERY replaces POST, not GET.
+///
+/// There is no automatic downgrade. If the server or an intermediary
+/// rejects `QUERY`, the error is returned as for any other unary HTTP error
+/// and the request is not retried with POST.
+///
+/// # Errors
+///
+/// Returns `invalid_argument` if `config.protocol` is not `Connect`;
+/// `Internal` for a mismatched `spec` (see [`call_unary`]).
+pub async fn call_unary_query<T, Req, RespView>(
+    transport: &T,
+    config: &ClientConfig,
+    spec: Spec,
+    request: Req,
+    options: CallOptions,
+) -> Result<UnaryResponse<OwnedView<RespView>>, ConnectError>
+where
+    T: ClientTransport,
+    <T::ResponseBody as Body>::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    Req: buffa::Message + crate::codec::JsonSerialize,
+    RespView: MessageView<'static> + Send,
+    RespView::Owned: buffa::Message + crate::codec::JsonDeserialize,
+{
+    check_client_spec(spec, StreamType::Unary, "call_unary_query")?;
+    // HTTP QUERY is a Connect-protocol-only feature.
+    if !matches!(config.protocol, Protocol::Connect) {
+        return Err(ConnectError::invalid_argument(
+            "call_unary_query requires Protocol::Connect (gRPC/gRPC-Web are POST-only)",
+        ));
+    }
+    call_unary_with_method(
+        transport,
+        config,
+        spec,
+        request,
+        options,
+        crate::protocol::query_method(),
+        "call_unary_query",
+    )
+    .await
+}
+
+/// The unary request path shared by [`call_unary`] (POST) and
+/// [`call_unary_query`] (QUERY): everything but the method is identical.
+async fn call_unary_with_method<T, Req, RespView>(
+    transport: &T,
+    config: &ClientConfig,
+    spec: Spec,
+    request: Req,
+    options: CallOptions,
+    method: http::Method,
+    entry_point: &'static str,
+) -> Result<UnaryResponse<OwnedView<RespView>>, ConnectError>
+where
+    T: ClientTransport,
+    <T::ResponseBody as Body>::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    Req: buffa::Message + crate::codec::JsonSerialize,
+    RespView: MessageView<'static> + Send,
+    RespView::Owned: buffa::Message + crate::codec::JsonDeserialize,
+{
+    check_client_spec(spec, StreamType::Unary, entry_point)?;
     let options = effective_options(config, options);
     let uri = procedure_uri(config, spec.procedure, None)?;
 
@@ -2184,7 +2276,7 @@ where
     let deadline = client_deadline(options.timeout, config.protocol);
 
     // Build the HTTP request with protocol-aware headers
-    let mut builder = Request::builder().method(http::Method::POST).uri(uri);
+    let mut builder = Request::builder().method(method).uri(uri);
     builder = add_unary_request_headers(builder, config, options.timeout, applied_content_encoding);
 
     // Merge user-provided headers (last, so they can override anything)
@@ -11225,5 +11317,184 @@ mod tests {
         .unwrap();
         assert_eq!(&message[..], b"only");
         assert!(trailers.is_empty());
+    }
+}
+
+/// `call_unary_query`: the POST request with the method changed to QUERY.
+#[cfg(test)]
+mod http_query_tests {
+    use super::*;
+    use buffa_types::google::protobuf::__buffa::view::StringValueView;
+    use buffa_types::google::protobuf::StringValue;
+    use http_body_util::BodyExt;
+    use std::sync::{Arc, Mutex};
+
+    type Sent = Arc<Mutex<Vec<(http::Method, http::Uri, http::HeaderMap, Bytes)>>>;
+
+    /// Records every request and answers with a fixed status.
+    #[derive(Clone)]
+    struct Recorder {
+        sent: Sent,
+        status: http::StatusCode,
+    }
+
+    impl Recorder {
+        fn new(status: http::StatusCode) -> Self {
+            Self {
+                sent: Sent::default(),
+                status,
+            }
+        }
+    }
+
+    impl ClientTransport for Recorder {
+        type ResponseBody = Full<Bytes>;
+        type Error = ConnectError;
+
+        fn send(
+            &self,
+            request: Request<ClientBody>,
+        ) -> BoxFuture<'static, Result<Response<Self::ResponseBody>, Self::Error>> {
+            let sent = Arc::clone(&self.sent);
+            let status = self.status;
+            Box::pin(async move {
+                let (parts, body) = request.into_parts();
+                let body = body.collect().await?.to_bytes();
+                sent.lock()
+                    .unwrap()
+                    .push((parts.method, parts.uri, parts.headers, body));
+                let reply = crate::codec::encode_proto(&StringValue::from("pong")).unwrap();
+                Ok(Response::builder()
+                    .status(status)
+                    .header(http::header::CONTENT_TYPE, "application/proto")
+                    .body(Full::new(if status.is_success() {
+                        reply
+                    } else {
+                        Bytes::new()
+                    }))
+                    .unwrap())
+            })
+        }
+    }
+
+    fn config() -> ClientConfig {
+        ClientConfig::new("http://localhost:8080".parse().unwrap())
+    }
+
+    fn spec() -> Spec {
+        Spec::client("/svc.Svc/Read", StreamType::Unary)
+            .with_idempotency_level(crate::IdempotencyLevel::NoSideEffects)
+    }
+
+    async fn call_with(
+        call: bool,
+        transport: &Recorder,
+        config: &ClientConfig,
+    ) -> Result<String, ConnectError> {
+        let request = StringValue::from("ping");
+        let options = CallOptions::default().with_timeout(Duration::from_secs(5));
+        let response = if call {
+            call_unary_query::<_, StringValue, StringValueView<'static>>(
+                transport,
+                config,
+                spec(),
+                request,
+                options,
+            )
+            .await?
+        } else {
+            call_unary::<_, StringValue, StringValueView<'static>>(
+                transport,
+                config,
+                spec(),
+                request,
+                options,
+            )
+            .await?
+        };
+        let (_headers, message, _trailers) = response.into_owned_parts();
+        Ok(message.value)
+    }
+
+    #[tokio::test]
+    async fn query_differs_from_post_only_in_the_method() {
+        let post = Recorder::new(http::StatusCode::OK);
+        let query = Recorder::new(http::StatusCode::OK);
+        let config = config();
+        assert_eq!(call_with(false, &post, &config).await.unwrap(), "pong");
+        assert_eq!(call_with(true, &query, &config).await.unwrap(), "pong");
+
+        let post = post.sent.lock().unwrap().remove(0);
+        let query = query.sent.lock().unwrap().remove(0);
+        assert_eq!(post.0, http::Method::POST);
+        assert_eq!(query.0.as_str(), "QUERY");
+        // Same path, no query parameters, same headers (content type,
+        // protocol version, timeout, accept-encoding) and same body.
+        assert_eq!(query.1, post.1);
+        assert_eq!(query.1.query(), None);
+        assert_eq!(query.2, post.2);
+        assert!(query.2.contains_key(http::header::CONTENT_TYPE));
+        assert_eq!(query.3, post.3);
+        assert!(!query.3.is_empty());
+    }
+
+    #[cfg(feature = "gzip")]
+    #[tokio::test]
+    async fn query_compresses_the_request_like_post() {
+        let transport = Recorder::new(http::StatusCode::OK);
+        let config = config()
+            .compress_requests("gzip")
+            .with_compression_policy(CompressionPolicy::default().with_min_size(0));
+        call_with(true, &transport, &config).await.unwrap();
+        let (method, _, headers, body) = transport.sent.lock().unwrap().remove(0);
+        assert_eq!(method.as_str(), "QUERY");
+        assert_eq!(headers[http::header::CONTENT_ENCODING], "gzip");
+        let plain = config
+            .compression
+            .decompress_with_limit("gzip", body, usize::MAX)
+            .unwrap();
+        assert_eq!(
+            plain,
+            crate::codec::encode_proto(&StringValue::from("ping")).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_405_surfaces_as_an_error_without_a_post_retry() {
+        let transport = Recorder::new(http::StatusCode::METHOD_NOT_ALLOWED);
+        let err = call_with(true, &transport, &config()).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::Unknown);
+        let sent = transport.sent.lock().unwrap();
+        assert_eq!(sent.len(), 1, "no retry");
+        assert_eq!(sent[0].0.as_str(), "QUERY");
+    }
+
+    #[tokio::test]
+    async fn grpc_protocols_are_rejected_before_sending() {
+        for protocol in [Protocol::Grpc, Protocol::GrpcWeb] {
+            let transport = Recorder::new(http::StatusCode::OK);
+            let err = call_with(true, &transport, &config().with_protocol(protocol))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidArgument);
+            assert!(transport.sent.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stream_spec_is_rejected_before_sending() {
+        let transport = Recorder::new(http::StatusCode::OK);
+        let err = call_unary_query::<_, StringValue, StringValueView<'static>>(
+            &transport,
+            &config(),
+            Spec::client("/svc.Svc/Watch", StreamType::ServerStream),
+            StringValue::from("ping"),
+            CallOptions::default(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert!(err.message.as_deref().unwrap().contains("call_unary_query"));
+        assert!(transport.sent.lock().unwrap().is_empty());
     }
 }

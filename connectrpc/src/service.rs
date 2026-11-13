@@ -70,7 +70,7 @@ use crate::interceptor::{
     Interceptor, InterceptorChain, RequestHead, call_bidi_streaming_intercepted,
     call_client_streaming_intercepted, call_server_streaming_intercepted, call_unary_intercepted,
 };
-use crate::protocol::Protocol;
+use crate::protocol::{Protocol, is_query_method};
 use crate::response::{EncodedResponse, RequestContext};
 use crate::router::MethodKind;
 use crate::router::Router;
@@ -1360,6 +1360,8 @@ pub struct ConnectRpcService<D = Router> {
     /// Interceptor chain, outermost first. One pointer to clone per
     /// request regardless of chain length.
     interceptors: InterceptorChain,
+    /// Whether HTTP QUERY (RFC 10008) is accepted on GET-eligible procedures.
+    query_enabled: bool,
 }
 
 // Manual Clone impl because `#[derive(Clone)]` would add a `D: Clone` bound,
@@ -1373,6 +1375,7 @@ impl<D> Clone for ConnectRpcService<D> {
             compression_policy: self.compression_policy,
             deadline_policy: self.deadline_policy.clone(),
             interceptors: self.interceptors.clone(),
+            query_enabled: self.query_enabled,
         }
     }
 }
@@ -1397,6 +1400,7 @@ impl<D: Dispatcher> ConnectRpcService<D> {
             compression_policy: CompressionPolicy::default(),
             deadline_policy: DeadlinePolicy::new(),
             interceptors: InterceptorChain::default(),
+            query_enabled: true,
         }
     }
 
@@ -1495,6 +1499,31 @@ impl<D: Dispatcher> ConnectRpcService<D> {
     pub fn with_interceptor_arc(mut self, interceptor: Arc<dyn Interceptor>) -> Self {
         self.interceptors.push(interceptor);
         self
+    }
+
+    /// Enable or disable HTTP QUERY (RFC 10008) for unary Connect requests.
+    ///
+    /// Enabled by default: every procedure that accepts Connect GET (a unary
+    /// method declared `idempotency_level = NO_SIDE_EFFECTS`) also accepts
+    /// `QUERY`. A `QUERY` request is an ordinary unary POST with the method
+    /// changed: the message travels in the request body, with the same
+    /// `Content-Type`, compression and timeout headers, and none of the GET
+    /// query parameters are read. gRPC and gRPC-Web stay POST-only.
+    ///
+    /// With `false` the service treats `QUERY` as an unknown method: `405
+    /// Method Not Allowed` with an `Allow` header that omits `QUERY`. GET and
+    /// POST are unaffected.
+    #[must_use]
+    pub fn with_http_query(mut self, enabled: bool) -> Self {
+        self.query_enabled = enabled;
+        self
+    }
+
+    /// Whether HTTP QUERY is accepted. See
+    /// [`with_http_query`](Self::with_http_query).
+    #[must_use]
+    pub fn http_query_enabled(&self) -> bool {
+        self.query_enabled
     }
 
     /// Get the current limits configuration.
@@ -1610,6 +1639,7 @@ where
         let compression_policy = self.compression_policy;
         let deadline_policy = self.deadline_policy.clone();
         let interceptors = self.interceptors.clone();
+        let query_enabled = self.query_enabled;
 
         // Only create and attach the tracing span when a subscriber would
         // actually observe it. For disabled-debug (the common production case),
@@ -1639,6 +1669,7 @@ where
                 &compression_policy,
                 &deadline_policy,
                 &interceptors,
+                query_enabled,
             )
             .await
             {
@@ -1665,6 +1696,7 @@ async fn handle_request<D, B>(
     compression_policy: &CompressionPolicy,
     deadline_policy: &DeadlinePolicy,
     interceptors: &[Arc<dyn Interceptor>],
+    query_enabled: bool,
 ) -> Result<Response<ConnectRpcBody>, ConnectError>
 where
     D: Dispatcher,
@@ -1688,14 +1720,48 @@ where
     let desc = dispatcher.lookup(&path);
     let limits = desc.and_then(|d| d.limits).unwrap_or(limits);
 
-    // Only GET and POST carry RPCs. Reject every other verb uniformly with
-    // 405 Method Not Allowed plus an `Allow` header (connect-go parity),
-    // regardless of whether a Content-Type is present. Without this, a bodyless
-    // OPTIONS/HEAD request (no Content-Type, so protocol detection returns
-    // None) would fall through to the unsupported-media-type path and be
-    // misreported as 415. An unknown path still maps to 404.
-    if req.method() != Method::GET && req.method() != Method::POST {
-        return reject_unsupported_method(&path, desc, req, limits, deadline_policy).await;
+    // Only GET, POST and (for eligible procedures) QUERY carry RPCs. Reject
+    // every other verb uniformly with 405 Method Not Allowed plus an `Allow`
+    // header (connect-go parity), regardless of whether a Content-Type is
+    // present. Without this, a bodyless OPTIONS/HEAD request (no Content-Type,
+    // so protocol detection returns None) would fall through to the
+    // unsupported-media-type path and be misreported as 415. An unknown path
+    // still maps to 404. QUERY on a procedure that cannot take it, or with
+    // QUERY disabled, is rejected as an unknown verb would be.
+    let is_query = is_query_method(req.method());
+    if req.method() != Method::GET
+        && req.method() != Method::POST
+        && !(is_query && query_accepted(query_enabled, desc))
+    {
+        return reject_unsupported_method(&path, desc, req, limits, deadline_policy, query_enabled)
+            .await;
+    }
+
+    // QUERY is a unary POST with a different method token: it needs a unary
+    // Connect content type. gRPC, gRPC-Web and Connect streaming content types
+    // are POST-only, so they get the same 415 as an unknown type.
+    if is_query {
+        return match request_protocol {
+            Some(rp) if rp.protocol == Protocol::Connect && !rp.is_streaming => {
+                if !interceptors.is_empty() {
+                    intercept_heads(interceptors, &mut req, desc, Protocol::Connect).await?;
+                }
+                handle_unary_request(
+                    &*dispatcher,
+                    &path,
+                    desc,
+                    req,
+                    limits,
+                    compression,
+                    compression_policy,
+                    deadline_policy,
+                    interceptors,
+                )
+                .await
+                .map(|r| r.map(ConnectRpcBody::Full))
+            }
+            _ => reject_query_media_type(req, &path, limits, deadline_policy).await,
+        };
     }
 
     // Connect GET requests don't have a Content-Type header, so protocol
@@ -1921,11 +1987,58 @@ const ACCEPT_POST: &str = "application/connect+proto, application/grpc, \
 application/grpc+proto, application/grpc-web, application/grpc-web+proto, \
 application/proto";
 
-/// Reject an HTTP method other than GET or POST.
+/// `Accept-Query` advertised on a 415 response to a QUERY request: the unary
+/// Connect content types, as an RFC 9651 Structured Field List of Tokens. The
+/// gRPC, gRPC-Web and streaming types are omitted because QUERY cannot carry
+/// them. JSON appears only when the `json` feature is enabled, as for
+/// [`ACCEPT_POST`].
+#[cfg(feature = "json")]
+const ACCEPT_QUERY: &str = "application/json, application/proto";
+
+/// See the `json`-enabled variant.
+#[cfg(not(feature = "json"))]
+const ACCEPT_QUERY: &str = "application/proto";
+
+/// Whether QUERY (RFC 10008) may be used on this procedure: the service has it
+/// enabled and the procedure is a GET-eligible unary method.
+fn query_accepted(query_enabled: bool, desc: Option<MethodDescriptor>) -> bool {
+    query_enabled && desc.is_some_and(|desc| desc.kind == MethodKind::Unary && desc.idempotent)
+}
+
+/// Reject a QUERY request whose `Content-Type` is missing or is not a unary
+/// Connect type with 415 and `Accept-Query`. The body is drained first so
+/// HTTP/1.1 connections stay reusable.
+async fn reject_query_media_type<B>(
+    req: Request<B>,
+    path: &str,
+    limits: Limits,
+    deadline_policy: &DeadlinePolicy,
+) -> Result<Response<ConnectRpcBody>, ConnectError>
+where
+    B: Body<Data = Bytes> + Send + 'static,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
+    let deadline = deadline_from_headers(req.headers(), Protocol::Connect, path, deadline_policy);
+    let (_parts, body) = req.into_parts();
+    let _ = with_request_deadline(
+        deadline,
+        collect_body_limited(body, limits.max_request_body_size),
+    )
+    .await;
+    let response = Response::builder()
+        .status(StatusCode::UNSUPPORTED_MEDIA_TYPE)
+        .header("accept-query", ACCEPT_QUERY)
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    Ok(response.map(ConnectRpcBody::Full))
+}
+
+/// Reject an HTTP method other than GET, POST or an acceptable QUERY.
 ///
 /// Mirrors connect-go: a known procedure path returns 405 Method Not Allowed
 /// with an `Allow` header listing the methods it accepts (always `POST`; plus
-/// `GET` for idempotent unary methods). An unknown path returns the same
+/// `GET` for idempotent unary methods, and `QUERY` for those when it is
+/// enabled). An unknown path returns the same
 /// `unimplemented` (HTTP 404) as any other route miss. The request body is
 /// drained first so HTTP/1.1 connections stay reusable.
 async fn reject_unsupported_method<B>(
@@ -1934,6 +2047,7 @@ async fn reject_unsupported_method<B>(
     req: Request<B>,
     limits: Limits,
     deadline_policy: &DeadlinePolicy,
+    query_enabled: bool,
 ) -> Result<Response<ConnectRpcBody>, ConnectError>
 where
     B: Body<Data = Bytes> + Send + 'static,
@@ -1941,7 +2055,11 @@ where
 {
     let allow = desc.map(|desc| {
         if desc.kind == MethodKind::Unary && desc.idempotent {
-            "GET, POST"
+            if query_enabled {
+                "GET, POST, QUERY"
+            } else {
+                "GET, POST"
+            }
         } else {
             "POST"
         }
@@ -2021,7 +2139,7 @@ where
     })?;
     let is_idempotent = desc.idempotent;
 
-    // Handle GET vs POST requests
+    // Handle GET vs POST (and QUERY) requests
     let (body, codec_format) = if method == Method::GET {
         // GET requests are only allowed for idempotent methods
         if !is_idempotent {
@@ -2052,7 +2170,16 @@ where
         })?;
 
         (message, codec_format)
-    } else if method == Method::POST {
+    } else if method == Method::POST || is_query_method(&method) {
+        // QUERY is handled exactly like POST: the message is the request
+        // body. `handle_request` has already checked it is enabled for this
+        // procedure; this guards callers that reach here directly.
+        if method != Method::POST && !is_idempotent {
+            return Err(ConnectError::method_not_allowed(
+                "QUERY requests are only supported for idempotent methods",
+            ));
+        }
+
         // Validate Connect-Protocol-Version header for POST
         if let Some(ref version) = metadata.protocol_version
             && version != "1"
@@ -2095,10 +2222,10 @@ where
 
         (body, codec_format)
     } else {
-        // Backstop: `handle_request` rejects every non-GET/POST verb upstream
-        // (with 405 + `Allow`), so this arm is unreachable in normal dispatch.
+        // Backstop: `handle_request` rejects every other verb upstream (with
+        // 405 + `Allow`), so this arm is unreachable in normal dispatch.
         return Err(ConnectError::method_not_allowed(
-            "only GET and POST methods are supported",
+            "only GET, POST and QUERY methods are supported",
         ));
     };
 
@@ -5052,6 +5179,7 @@ mod tests {
                 &CompressionPolicy::default(),
                 &DeadlinePolicy::new(),
                 &[],
+                true,
             )
             .await
             .expect("415 is returned as an Ok response, not an Err");
@@ -5078,6 +5206,7 @@ mod tests {
             &CompressionPolicy::default(),
             &DeadlinePolicy::new(),
             &[],
+            true,
         )
         .await
         {
@@ -5113,6 +5242,7 @@ mod tests {
             &CompressionPolicy::default(),
             &DeadlinePolicy::new(),
             &[],
+            true,
         )
         .await
         .expect("a gRPC codec rejection is returned as an Ok response");
@@ -5138,6 +5268,7 @@ mod tests {
             &CompressionPolicy::default(),
             &DeadlinePolicy::new(),
             &[],
+            true,
         )
         .await
         .expect("a gRPC-Web codec rejection is returned as an Ok response");
@@ -5191,6 +5322,7 @@ mod tests {
                 &CompressionPolicy::default(),
                 &DeadlinePolicy::new(),
                 &[],
+                true,
             )
             .await
         }
@@ -5223,7 +5355,10 @@ mod tests {
             .unwrap();
         let resp = call(&dispatcher, req).await.expect("405");
         assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
-        assert_eq!(resp.headers().get(header::ALLOW).unwrap(), "GET, POST");
+        assert_eq!(
+            resp.headers().get(header::ALLOW).unwrap(),
+            "GET, POST, QUERY"
+        );
 
         // Unknown path with a bad verb maps to 404 route-not-found.
         let req = Request::builder()
@@ -5257,6 +5392,7 @@ mod tests {
             &CompressionPolicy::default(),
             &DeadlinePolicy::new(),
             &[],
+            true,
         )
         .await
         .expect("415 is returned as an Ok response");
@@ -6601,6 +6737,7 @@ mod tests {
                 &CompressionPolicy::default(),
                 &DeadlinePolicy::new(),
                 &[],
+                true,
             )
             .await
         }
@@ -7029,6 +7166,7 @@ mod tests {
                 &CompressionPolicy::default(),
                 &DeadlinePolicy::new(),
                 &[],
+                true,
             )
             .await
             .expect("dispatch succeeds");
@@ -7230,6 +7368,7 @@ mod intercept_head_tests {
             &CompressionPolicy::default(),
             &DeadlinePolicy::new(),
             interceptors,
+            true,
         )
         .await
     }
@@ -7555,5 +7694,363 @@ mod intercept_head_tests {
         .expect("dispatch should succeed");
 
         assert_eq!(*seen.lock().unwrap(), Some("alice"));
+    }
+}
+
+/// HTTP QUERY (RFC 10008): a unary POST with the method token changed, on the
+/// procedures that accept GET.
+#[cfg(test)]
+mod http_query_tests {
+    use super::*;
+    use crate::interceptor::Interceptor;
+    use crate::{ServiceStream, handler_fn};
+    use buffa_types::google::protobuf::StringValue;
+    use http_body_util::BodyExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tower::Service as _;
+
+    fn query() -> http::request::Builder {
+        Request::builder().method(crate::protocol::query_method())
+    }
+
+    fn proto_body(value: &str) -> Bytes {
+        crate::codec::encode_proto(&StringValue::from(value)).unwrap()
+    }
+
+    fn router() -> Router {
+        let echo = || {
+            handler_fn(|_ctx: RequestContext, req: StringValue| async { crate::Response::ok(req) })
+        };
+        Router::new()
+            .route_idempotent("svc", "Read", echo())
+            .route("svc", "Write", echo())
+            .route_idempotent(
+                "svc",
+                "Fail",
+                handler_fn(|_ctx: RequestContext, _req: StringValue| async {
+                    Err::<crate::Response<StringValue>, _>(ConnectError::invalid_argument("nope"))
+                }),
+            )
+            .route_server_stream(
+                "svc",
+                "Watch",
+                crate::handler::streaming_handler_fn(
+                    |_ctx: RequestContext, req: StringValue| async {
+                        crate::Response::stream_ok(futures::stream::iter([Ok(req)]))
+                    },
+                ),
+            )
+            .route_client_stream(
+                "svc",
+                "Upload",
+                crate::handler::client_streaming_handler_fn(
+                    |_ctx: RequestContext, _reqs: ServiceStream<StringValue>| async {
+                        crate::Response::ok(StringValue::default())
+                    },
+                ),
+            )
+    }
+
+    async fn send(
+        service: &mut ConnectRpcService,
+        req: http::request::Builder,
+        body: Bytes,
+    ) -> Response<ConnectRpcBody> {
+        service
+            .call(req.body(Full::new(body)).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn body_bytes(resp: Response<ConnectRpcBody>) -> Bytes {
+        resp.into_body().collect().await.unwrap().to_bytes()
+    }
+
+    fn allow(resp: &Response<ConnectRpcBody>) -> &str {
+        resp.headers()
+            .get(header::ALLOW)
+            .expect("405 carries Allow")
+            .to_str()
+            .unwrap()
+    }
+
+    #[test]
+    fn method_helper_matches_only_the_exact_token() {
+        assert!(is_query_method(&crate::protocol::query_method()));
+        assert!(!is_query_method(&Method::GET));
+        assert!(!is_query_method(&Method::POST));
+        assert_eq!(crate::protocol::query_method().as_str(), "QUERY");
+        assert!(!is_query_method(&Method::from_bytes(b"query").unwrap()));
+    }
+
+    #[tokio::test]
+    async fn eligible_procedure_answers_query_by_default() {
+        let mut service = ConnectRpcService::new(router());
+        assert!(service.http_query_enabled());
+        // The URI query is ignored, as it is for POST.
+        let resp = send(
+            &mut service,
+            query()
+                .uri("/svc/Read?message=ignored&encoding=bogus")
+                .header(header::CONTENT_TYPE, "application/proto"),
+            proto_body("hello"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], "application/proto");
+        // No `Vary` is added: the content type is part of the QUERY cache key.
+        assert!(resp.headers().get(header::VARY).is_none());
+        let got =
+            <StringValue as buffa::Message>::decode_from_slice(&body_bytes(resp).await).unwrap();
+        assert_eq!(got.value, "hello");
+    }
+
+    #[tokio::test]
+    async fn empty_body_is_a_valid_message() {
+        let mut service = ConnectRpcService::new(router());
+        let resp = send(
+            &mut service,
+            query()
+                .uri("/svc/Read")
+                .header(header::CONTENT_TYPE, "application/proto"),
+            Bytes::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(body_bytes(resp).await.is_empty());
+    }
+
+    #[cfg(feature = "json")]
+    #[tokio::test]
+    async fn eligible_procedure_answers_query_with_json() {
+        let mut service = ConnectRpcService::new(router());
+        let resp = send(
+            &mut service,
+            query()
+                .uri("/svc/Read")
+                .header(header::CONTENT_TYPE, "application/json"),
+            Bytes::from_static(br#""hello""#),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], "application/json");
+        assert_eq!(body_bytes(resp).await, Bytes::from_static(br#""hello""#));
+    }
+
+    #[cfg(feature = "gzip")]
+    #[tokio::test]
+    async fn query_accepts_a_compressed_body() {
+        let mut service = ConnectRpcService::new(router());
+        let compressed = CompressionRegistry::default()
+            .compress("gzip", &proto_body("zipped"))
+            .unwrap();
+        let resp = send(
+            &mut service,
+            query()
+                .uri("/svc/Read")
+                .header(header::CONTENT_TYPE, "application/proto")
+                .header(header::CONTENT_ENCODING, "gzip")
+                .header(header::ACCEPT_ENCODING, "gzip"),
+            compressed,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let encoding = resp.headers().get(header::CONTENT_ENCODING).cloned();
+        let body = body_bytes(resp).await;
+        let plain = match encoding {
+            Some(encoding) => CompressionRegistry::default()
+                .decompress_with_limit(encoding.to_str().unwrap(), body, usize::MAX)
+                .unwrap(),
+            None => body,
+        };
+        let got = <StringValue as buffa::Message>::decode_from_slice(&plain).unwrap();
+        assert_eq!(got.value, "zipped");
+    }
+
+    #[tokio::test]
+    async fn ineligible_procedures_answer_405_without_query_in_allow() {
+        let mut service = ConnectRpcService::new(router());
+        for path in ["/svc/Write", "/svc/Watch", "/svc/Upload"] {
+            let resp = send(
+                &mut service,
+                query()
+                    .uri(path)
+                    .header(header::CONTENT_TYPE, "application/proto"),
+                proto_body("x"),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED, "{path}");
+            assert_eq!(allow(&resp), "POST", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn eligible_procedure_lists_query_in_allow_for_other_verbs() {
+        let mut service = ConnectRpcService::new(router());
+        let resp = send(
+            &mut service,
+            Request::builder().method(Method::DELETE).uri("/svc/Read"),
+            Bytes::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(allow(&resp), "GET, POST, QUERY");
+    }
+
+    #[tokio::test]
+    async fn unknown_procedure_is_not_found() {
+        let mut service = ConnectRpcService::new(router());
+        let resp = send(
+            &mut service,
+            query()
+                .uri("/svc/Missing")
+                .header(header::CONTENT_TYPE, "application/proto"),
+            Bytes::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn disabled_query_answers_405_and_leaves_get_and_post_alone() {
+        let mut service = ConnectRpcService::new(router()).with_http_query(false);
+        assert!(!service.http_query_enabled());
+        let resp = send(
+            &mut service,
+            query()
+                .uri("/svc/Read")
+                .header(header::CONTENT_TYPE, "application/proto"),
+            proto_body("x"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(allow(&resp), "GET, POST");
+
+        let resp = send(
+            &mut service,
+            Request::builder()
+                .method(Method::POST)
+                .uri("/svc/Read")
+                .header(header::CONTENT_TYPE, "application/proto"),
+            proto_body("x"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = send(
+            &mut service,
+            Request::builder()
+                .method(Method::GET)
+                .uri("/svc/Read?message=&encoding=proto&base64=1&connect=v1"),
+            Bytes::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn clone_keeps_the_query_setting() {
+        let service = ConnectRpcService::new(router()).with_http_query(false);
+        assert!(!service.clone().http_query_enabled());
+    }
+
+    #[tokio::test]
+    async fn unsupported_content_types_answer_415_with_accept_query() {
+        let mut service = ConnectRpcService::new(router());
+        let cases = [
+            Some("application/foo"),
+            Some("application/grpc"),
+            Some("application/grpc-web+proto"),
+            Some("application/connect+proto"),
+            None,
+        ];
+        for content_type in cases {
+            let mut builder = query().uri("/svc/Read");
+            if let Some(content_type) = content_type {
+                builder = builder.header(header::CONTENT_TYPE, content_type);
+            }
+            let resp = send(&mut service, builder, proto_body("x")).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "{content_type:?}"
+            );
+            let accept = resp.headers()["accept-query"].to_str().unwrap();
+            assert!(accept.contains("application/proto"));
+            // Only the unary Connect types are usable with QUERY.
+            assert!(!accept.contains("grpc") && !accept.contains("connect+"));
+            assert!(resp.headers().get("accept-post").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn errors_use_the_unary_error_format() {
+        let mut service = ConnectRpcService::new(router());
+        let resp = send(
+            &mut service,
+            query()
+                .uri("/svc/Fail")
+                .header(header::CONTENT_TYPE, "application/proto"),
+            proto_body("x"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], "application/json");
+        let body = body_bytes(resp).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "invalid_argument");
+        assert_eq!(json["message"], "nope");
+    }
+
+    #[tokio::test]
+    async fn protocol_version_is_validated_like_post() {
+        let mut service = ConnectRpcService::new(router());
+        let resp = send(
+            &mut service,
+            query()
+                .uri("/svc/Read")
+                .header(header::CONTENT_TYPE, "application/proto")
+                .header("connect-protocol-version", "2"),
+            proto_body("x"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn interceptors_run_for_query() {
+        struct Count(Arc<AtomicUsize>, Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl Interceptor for Count {
+            async fn intercept_head(
+                &self,
+                _head: &mut crate::interceptor::RequestHead<'_>,
+            ) -> Result<(), ConnectError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn intercept_unary(
+                &self,
+                req: crate::interceptor::UnaryRequest,
+                next: crate::interceptor::Next<'_>,
+            ) -> Result<crate::interceptor::UnaryResponse, ConnectError> {
+                self.1.fetch_add(1, Ordering::SeqCst);
+                next.run(req).await
+            }
+        }
+        let (heads, unaries) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let mut service = ConnectRpcService::new(router())
+            .with_interceptor(Count(Arc::clone(&heads), Arc::clone(&unaries)));
+        let resp = send(
+            &mut service,
+            query()
+                .uri("/svc/Read")
+                .header(header::CONTENT_TYPE, "application/proto"),
+            proto_body("x"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(heads.load(Ordering::SeqCst), 1);
+        assert_eq!(unaries.load(Ordering::SeqCst), 1);
     }
 }

@@ -12,10 +12,30 @@
 //! Protocol detection is performed by examining the `Content-Type` header
 //! of incoming requests.
 
+use std::sync::LazyLock;
+
 use http::HeaderMap;
+use http::Method;
 use http::header::CONTENT_TYPE;
 
 use crate::codec::CodecFormat;
+
+/// The HTTP QUERY method (RFC 10008), built once.
+///
+/// Not every `http` release this crate supports has a `Method::QUERY`
+/// constant, so the extension method is constructed here and nowhere else.
+static QUERY_METHOD: LazyLock<Method> =
+    LazyLock::new(|| Method::from_bytes(b"QUERY").expect("QUERY is a valid method token"));
+
+/// A clone of the HTTP QUERY method (RFC 10008).
+pub(crate) fn query_method() -> Method {
+    QUERY_METHOD.clone()
+}
+
+/// Whether `method` is HTTP QUERY (RFC 10008). The token is case-sensitive.
+pub(crate) fn is_query_method(method: &Method) -> bool {
+    *method == *QUERY_METHOD
+}
 
 /// Pre-parsed header names for response building.
 ///

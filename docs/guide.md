@@ -2084,6 +2084,29 @@ A `plaintext()` client refuses `https://` URIs and a `with_tls()`
 client refuses `http://` URIs - this catches misconfiguration loudly
 rather than silently downgrading.
 
+### HTTP GET and HTTP QUERY for idempotent methods
+
+`call_unary` sends POST. For a method declared
+`idempotency_level = NO_SIDE_EFFECTS` you can choose another request form,
+Connect protocol only (gRPC and gRPC-Web are POST-only):
+
+- `client::call_unary_get` encodes the message into the URL, so the request
+  is cacheable but limited by URL length.
+- `client::call_unary_query` sends the same request as `call_unary` with the
+  method changed to HTTP QUERY (RFC 10008): the message travels in the body,
+  with no size limit, and the response is still cacheable. It does not read
+  the method's idempotency level, so use it only for such methods, as with
+  `call_unary_get`. A caller that uses both sends a request that fits in a URL
+  with GET and the rest with QUERY. If the server rejects QUERY (for example a
+  `405`), the error is returned; the call is not retried with POST.
+
+On the server, every procedure that accepts GET also accepts QUERY by
+default; any other procedure answers `405 Method Not Allowed` with an `Allow`
+header that omits `QUERY`. A QUERY request with a missing or non-unary
+content type gets `415` with `Accept-Query`. To turn QUERY off, call
+`ConnectRpcService::with_http_query(false)` (or the same method on `Server`);
+the server then treats QUERY as an unknown method.
+
 ### Connection-establishment bounds and keep-alive
 
 Both `HttpClient` and `Http2Connection` bound connection establishment by default: a 20-second wall-clock budget on the whole DNS + TCP + TLS chain (`DEFAULT_ESTABLISHMENT_TIMEOUT`) with an additional 5-second per-address TCP bound (`DEFAULT_TCP_CONNECT_TIMEOUT`). Exceeding either surfaces as `ErrorCode::Unavailable`, so a server that accepts the TCP connection but stalls the TLS handshake cannot park `poll_ready` indefinitely. To adjust or opt out, use the `builder()` entry point on either transport:
