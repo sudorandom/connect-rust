@@ -494,6 +494,13 @@ pub struct FeaturesView<'a> {
     ///
     /// Field 12: `supports_message_receive_limit`
     pub supports_message_receive_limit: ::core::option::Option<bool>,
+    /// Whether Connect via the HTTP QUERY method is supported (RFC 10008).
+    /// If absent, false is assumed. Unlike supports_connect_get, this defaults
+    /// to false so that implementations that have not adopted QUERY keep passing
+    /// when they upgrade to a version of the test suite that includes it.
+    ///
+    /// Field 13: `supports_connect_query`
+    pub supports_connect_query: ::core::option::Option<bool>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> ::buffa::MessageView<'a> for FeaturesView<'a> {
@@ -578,6 +585,15 @@ impl<'a> ::buffa::MessageView<'a> for FeaturesView<'a> {
                     ::buffa::encoding::WireType::Varint,
                 )?;
                 view.supports_message_receive_limit = Some(
+                    ::buffa::types::decode_bool(&mut cur)?,
+                );
+            }
+            13u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                view.supports_connect_query = Some(
                     ::buffa::types::decode_bool(&mut cur)?,
                 );
             }
@@ -761,6 +777,7 @@ impl<'a> ::buffa::MessageView<'a> for FeaturesView<'a> {
                 .supports_half_duplex_bidi_over_http1,
             supports_connect_get: self.supports_connect_get,
             supports_message_receive_limit: self.supports_message_receive_limit,
+            supports_connect_query: self.supports_connect_query,
             __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
             ..::core::default::Default::default()
         })
@@ -831,6 +848,9 @@ impl<'a> ::buffa::ViewEncode<'a> for FeaturesView<'a> {
             size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
         }
         if self.supports_message_receive_limit.is_some() {
+            size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
+        if self.supports_connect_query.is_some() {
             size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
@@ -920,6 +940,9 @@ impl<'a> ::buffa::ViewEncode<'a> for FeaturesView<'a> {
         if let Some(v) = self.supports_message_receive_limit {
             ::buffa::types::put_bool_field(12u32, v, buf);
         }
+        if let Some(v) = self.supports_connect_query {
+            ::buffa::types::put_bool_field(13u32, v, buf);
+        }
         self.__buffa_unknown_fields.write_to(buf);
     }
 }
@@ -998,6 +1021,9 @@ impl<'__a> ::serde::Serialize for FeaturesView<'__a> {
         }
         if let ::core::option::Option::Some(__v) = self.supports_message_receive_limit {
             __map.serialize_entry("supportsMessageReceiveLimit", &__v)?;
+        }
+        if let ::core::option::Option::Some(__v) = self.supports_connect_query {
+            __map.serialize_entry("supportsConnectQuery", &__v)?;
         }
         __map.end()
     }
@@ -1197,6 +1223,16 @@ impl FeaturesOwnedView {
     #[must_use]
     pub fn supports_message_receive_limit(&self) -> ::core::option::Option<bool> {
         self.0.reborrow().supports_message_receive_limit
+    }
+    /// Whether Connect via the HTTP QUERY method is supported (RFC 10008).
+    /// If absent, false is assumed. Unlike supports_connect_get, this defaults
+    /// to false so that implementations that have not adopted QUERY keep passing
+    /// when they upgrade to a version of the test suite that includes it.
+    ///
+    /// Field 13: `supports_connect_query`
+    #[must_use]
+    pub fn supports_connect_query(&self) -> ::core::option::Option<bool> {
+        self.0.reborrow().supports_connect_query
     }
 }
 impl ::core::convert::From<::buffa::OwnedView<FeaturesView<'static>>>

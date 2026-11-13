@@ -2886,6 +2886,23 @@ pub mod conformance_payload {
             super::conformance_payload::ConnectGetInfo,
             ::buffa::Inline<super::conformance_payload::ConnectGetInfo>,
         >,
+        /// The HTTP method the server observed for the request, such as "POST",
+        /// "GET", or "QUERY". The value is the exact method token, so "QUERY" is
+        /// uppercase.
+        ///
+        /// Servers that support the Connect protocol over the HTTP QUERY method
+        /// must populate this field for every request. It is only checked for test
+        /// cases that expect a QUERY request, so servers that do not yet populate
+        /// it keep passing all other test cases. Unlike connect_get_info, it is not
+        /// sufficient to merely include an empty message: the value is compared.
+        ///
+        /// Field 5: `http_method`
+        #[serde(
+            rename = "httpMethod",
+            alias = "http_method",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )]
+        pub http_method: ::core::option::Option<::buffa::alloc::string::String>,
         #[serde(skip)]
         #[doc(hidden)]
         pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -2897,6 +2914,7 @@ pub mod conformance_payload {
                 .field("timeout_ms", &self.timeout_ms)
                 .field("requests", &self.requests)
                 .field("connect_get_info", &self.connect_get_info)
+                .field("http_method", &self.http_method)
                 .finish()
         }
     }
@@ -2913,6 +2931,16 @@ pub mod conformance_payload {
         ///Sets [`Self::timeout_ms`] to `Some(value)`, consuming and returning `self`.
         pub fn with_timeout_ms(mut self, value: i64) -> Self {
             self.timeout_ms = Some(value);
+            self
+        }
+        #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+        #[inline]
+        ///Sets [`Self::http_method`] to `Some(value)`, consuming and returning `self`.
+        pub fn with_http_method(
+            mut self,
+            value: impl Into<::buffa::alloc::string::String>,
+        ) -> Self {
+            self.http_method = Some(value.into());
             self
         }
     }
@@ -2963,6 +2991,9 @@ pub mod conformance_payload {
                     += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                         + inner_size as u64;
             }
+            if let Some(ref v) = self.http_method {
+                size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+            }
             size += self.__buffa_unknown_fields.encoded_len() as u64;
             ::buffa::saturate_size(size)
         }
@@ -2999,6 +3030,9 @@ pub mod conformance_payload {
                     buf,
                 );
                 self.connect_get_info.write_to(__cache, buf);
+            }
+            if let Some(ref v) = self.http_method {
+                ::buffa::types::put_string_field(5u32, v, buf);
             }
             self.__buffa_unknown_fields.write_to(buf);
         }
@@ -3057,6 +3091,18 @@ pub mod conformance_payload {
                         ctx,
                     )?;
                 }
+                5u32 => {
+                    ::buffa::encoding::check_wire_type(
+                        tag,
+                        ::buffa::encoding::WireType::LengthDelimited,
+                    )?;
+                    ::buffa::types::merge_string(
+                        self
+                            .http_method
+                            .get_or_insert_with(::buffa::alloc::string::String::new),
+                        buf,
+                    )?;
+                }
                 _ => {
                     self.__buffa_unknown_fields
                         .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -3069,6 +3115,7 @@ pub mod conformance_payload {
             self.timeout_ms = ::core::option::Option::None;
             self.requests.clear();
             self.connect_get_info = ::buffa::MessageField::none();
+            self.http_method = ::core::option::Option::None;
             self.__buffa_unknown_fields.clear();
         }
     }

@@ -1472,6 +1472,18 @@ pub struct Features {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub supports_message_receive_limit: ::core::option::Option<bool>,
+    /// Whether Connect via the HTTP QUERY method is supported (RFC 10008).
+    /// If absent, false is assumed. Unlike supports_connect_get, this defaults
+    /// to false so that implementations that have not adopted QUERY keep passing
+    /// when they upgrade to a version of the test suite that includes it.
+    ///
+    /// Field 13: `supports_connect_query`
+    #[serde(
+        rename = "supportsConnectQuery",
+        alias = "supports_connect_query",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub supports_connect_query: ::core::option::Option<bool>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -1497,6 +1509,7 @@ impl ::core::fmt::Debug for Features {
                 "supports_message_receive_limit",
                 &self.supports_message_receive_limit,
             )
+            .field("supports_connect_query", &self.supports_connect_query)
             .finish()
     }
 }
@@ -1555,6 +1568,13 @@ impl Features {
     ///Sets [`Self::supports_message_receive_limit`] to `Some(value)`, consuming and returning `self`.
     pub fn with_supports_message_receive_limit(mut self, value: bool) -> Self {
         self.supports_message_receive_limit = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::supports_connect_query`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_supports_connect_query(mut self, value: bool) -> Self {
+        self.supports_connect_query = Some(value);
         self
     }
 }
@@ -1637,6 +1657,9 @@ impl ::buffa::Message for Features {
             size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
         }
         if self.supports_message_receive_limit.is_some() {
+            size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
+        if self.supports_connect_query.is_some() {
             size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
@@ -1724,6 +1747,9 @@ impl ::buffa::Message for Features {
         }
         if let Some(v) = self.supports_message_receive_limit {
             ::buffa::types::put_bool_field(12u32, v, buf);
+        }
+        if let Some(v) = self.supports_connect_query {
+            ::buffa::types::put_bool_field(13u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -1991,6 +2017,15 @@ impl ::buffa::Message for Features {
                     ::buffa::types::decode_bool(buf)?,
                 );
             }
+            13u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.supports_connect_query = ::core::option::Option::Some(
+                    ::buffa::types::decode_bool(buf)?,
+                );
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -2011,6 +2046,7 @@ impl ::buffa::Message for Features {
         self.supports_half_duplex_bidi_over_http1 = ::core::option::Option::None;
         self.supports_connect_get = ::core::option::Option::None;
         self.supports_message_receive_limit = ::core::option::Option::None;
+        self.supports_connect_query = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }

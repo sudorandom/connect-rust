@@ -140,6 +140,14 @@ pub struct ClientCompatRequestView<'a> {
     pub raw_request: ::buffa::MessageFieldView<
         super::super::__buffa::view::RawHTTPRequestView<'a>,
     >,
+    /// If protocol indicates Connect and stream type indicates
+    /// Unary, this instructs the client to use the HTTP QUERY method
+    /// (RFC 10008) when making the request. The request is otherwise
+    /// identical to a unary POST request. It is never set together with
+    /// use_get_http_method.
+    ///
+    /// Field 21: `use_query_http_method`
+    pub use_query_http_method: bool,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> ::buffa::MessageView<'a> for ClientCompatRequestView<'a> {
@@ -350,6 +358,13 @@ impl<'a> ::buffa::MessageView<'a> for ClientCompatRequestView<'a> {
                     }
                 }
             }
+            21u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                view.use_query_http_method = ::buffa::types::decode_bool(&mut cur)?;
+            }
             15u32 => {
                 ::buffa::encoding::check_wire_type(
                     tag,
@@ -468,6 +483,7 @@ impl<'a> ::buffa::MessageView<'a> for ClientCompatRequestView<'a> {
                 }
                 None => ::buffa::MessageField::none(),
             },
+            use_query_http_method: self.use_query_http_method,
             __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
             ..::core::default::Default::default()
         })
@@ -586,6 +602,9 @@ impl<'a> ::buffa::ViewEncode<'a> for ClientCompatRequestView<'a> {
                 += 2u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                     + inner_size as u64;
         }
+        if self.use_query_http_method {
+            size += 2u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -697,6 +716,9 @@ impl<'a> ::buffa::ViewEncode<'a> for ClientCompatRequestView<'a> {
             );
             self.raw_request.write_to(__cache, buf);
         }
+        if self.use_query_http_method {
+            ::buffa::types::put_bool_field(21u32, self.use_query_http_method, buf);
+        }
         self.__buffa_unknown_fields.write_to(buf);
     }
 }
@@ -797,6 +819,9 @@ impl<'__a> ::serde::Serialize for ClientCompatRequestView<'__a> {
             if let ::core::option::Option::Some(__v) = self.raw_request.as_option() {
                 __map.serialize_entry("rawRequest", __v)?;
             }
+        }
+        if self.use_query_http_method {
+            __map.serialize_entry("useQueryHttpMethod", &self.use_query_http_method)?;
         }
         __map.end()
     }
@@ -1090,6 +1115,17 @@ impl ClientCompatRequestOwnedView {
         super::super::__buffa::view::RawHTTPRequestView<'_>,
     > {
         &self.0.reborrow().raw_request
+    }
+    /// If protocol indicates Connect and stream type indicates
+    /// Unary, this instructs the client to use the HTTP QUERY method
+    /// (RFC 10008) when making the request. The request is otherwise
+    /// identical to a unary POST request. It is never set together with
+    /// use_get_http_method.
+    ///
+    /// Field 21: `use_query_http_method`
+    #[must_use]
+    pub fn use_query_http_method(&self) -> bool {
+        self.0.reborrow().use_query_http_method
     }
 }
 impl ::core::convert::From<::buffa::OwnedView<ClientCompatRequestView<'static>>>

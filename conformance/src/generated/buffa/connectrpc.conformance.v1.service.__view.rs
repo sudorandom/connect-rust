@@ -5185,6 +5185,18 @@ pub mod conformance_payload {
                 'a,
             >,
         >,
+        /// The HTTP method the server observed for the request, such as "POST",
+        /// "GET", or "QUERY". The value is the exact method token, so "QUERY" is
+        /// uppercase.
+        ///
+        /// Servers that support the Connect protocol over the HTTP QUERY method
+        /// must populate this field for every request. It is only checked for test
+        /// cases that expect a QUERY request, so servers that do not yet populate
+        /// it keep passing all other test cases. Unlike connect_get_info, it is not
+        /// sufficient to merely include an empty message: the value is compared.
+        ///
+        /// Field 5: `http_method`
+        pub http_method: ::core::option::Option<&'a str>,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
     }
     impl<'a> ::buffa::MessageView<'a> for RequestInfoView<'a> {
@@ -5250,6 +5262,13 @@ pub mod conformance_payload {
                             );
                         }
                     }
+                }
+                5u32 => {
+                    ::buffa::encoding::check_wire_type(
+                        tag,
+                        ::buffa::encoding::WireType::LengthDelimited,
+                    )?;
+                    view.http_method = Some(::buffa::types::borrow_str(&mut cur)?);
                 }
                 1u32 => {
                     ::buffa::encoding::check_wire_type(
@@ -5341,6 +5360,7 @@ pub mod conformance_payload {
                     }
                     None => ::buffa::MessageField::none(),
                 },
+                http_method: self.http_method.map(|s| s.to_string()),
                 __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
                 ..::core::default::Default::default()
             })
@@ -5379,6 +5399,9 @@ pub mod conformance_payload {
                     += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                         + inner_size as u64;
             }
+            if let Some(ref v) = self.http_method {
+                size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+            }
             size += self.__buffa_unknown_fields.encoded_len() as u64;
             ::buffa::saturate_size(size)
         }
@@ -5416,6 +5439,9 @@ pub mod conformance_payload {
                     buf,
                 );
                 self.connect_get_info.write_to(__cache, buf);
+            }
+            if let Some(ref v) = self.http_method {
+                ::buffa::types::put_string_field(5u32, v, buf);
             }
             self.__buffa_unknown_fields.write_to(buf);
         }
@@ -5458,6 +5484,9 @@ pub mod conformance_payload {
                 {
                     __map.serialize_entry("connectGetInfo", __v)?;
                 }
+            }
+            if let ::core::option::Option::Some(__v) = self.http_method {
+                __map.serialize_entry("httpMethod", __v)?;
             }
             __map.end()
         }
@@ -5609,6 +5638,21 @@ pub mod conformance_payload {
             >,
         > {
             &self.0.reborrow().connect_get_info
+        }
+        /// The HTTP method the server observed for the request, such as "POST",
+        /// "GET", or "QUERY". The value is the exact method token, so "QUERY" is
+        /// uppercase.
+        ///
+        /// Servers that support the Connect protocol over the HTTP QUERY method
+        /// must populate this field for every request. It is only checked for test
+        /// cases that expect a QUERY request, so servers that do not yet populate
+        /// it keep passing all other test cases. Unlike connect_get_info, it is not
+        /// sufficient to merely include an empty message: the value is compared.
+        ///
+        /// Field 5: `http_method`
+        #[must_use]
+        pub fn http_method(&self) -> ::core::option::Option<&'_ str> {
+            self.0.reborrow().http_method
         }
     }
     impl ::core::convert::From<::buffa::OwnedView<RequestInfoView<'static>>>

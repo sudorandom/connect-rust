@@ -237,6 +237,20 @@ pub struct ClientCompatRequest {
         RawHTTPRequest,
         ::buffa::Inline<RawHTTPRequest>,
     >,
+    /// If protocol indicates Connect and stream type indicates
+    /// Unary, this instructs the client to use the HTTP QUERY method
+    /// (RFC 10008) when making the request. The request is otherwise
+    /// identical to a unary POST request. It is never set together with
+    /// use_get_http_method.
+    ///
+    /// Field 21: `use_query_http_method`
+    #[serde(
+        rename = "useQueryHttpMethod",
+        alias = "use_query_http_method",
+        with = "::buffa::json_helpers::proto_bool",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_false"
+    )]
+    pub use_query_http_method: bool,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -264,6 +278,7 @@ impl ::core::fmt::Debug for ClientCompatRequest {
             .field("request_delay_ms", &self.request_delay_ms)
             .field("cancel", &self.cancel)
             .field("raw_request", &self.raw_request)
+            .field("use_query_http_method", &self.use_query_http_method)
             .finish()
     }
 }
@@ -430,6 +445,9 @@ impl ::buffa::Message for ClientCompatRequest {
                 += 2u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                     + inner_size as u64;
         }
+        if self.use_query_http_method {
+            size += 2u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -539,6 +557,9 @@ impl ::buffa::Message for ClientCompatRequest {
                 buf,
             );
             self.raw_request.write_to(__cache, buf);
+        }
+        if self.use_query_http_method {
+            ::buffa::types::put_bool_field(21u32, self.use_query_http_method, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -733,6 +754,13 @@ impl ::buffa::Message for ClientCompatRequest {
                     ctx,
                 )?;
             }
+            21u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.use_query_http_method = ::buffa::types::decode_bool(buf)?;
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -761,6 +789,7 @@ impl ::buffa::Message for ClientCompatRequest {
         self.request_delay_ms = 0u32;
         self.cancel = ::buffa::MessageField::none();
         self.raw_request = ::buffa::MessageField::none();
+        self.use_query_http_method = false;
         self.__buffa_unknown_fields.clear();
     }
 }
