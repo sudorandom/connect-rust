@@ -1,0 +1,6 @@
+kind: Added
+body: |-
+    `RequestContext::method` and `RequestHead::method` report the HTTP method
+    a request arrived with (`POST`, `GET` or `QUERY`), so handlers and
+    interceptors can tell the request forms apart.
+time: 2026-11-13T13:00:00.000000000+00:00

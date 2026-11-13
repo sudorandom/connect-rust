@@ -1955,7 +1955,8 @@ async fn intercept_heads<B>(
     let result = {
         let mut head = RequestHead::new(req.uri().path(), req.headers(), &mut extensions)
             .with_spec(desc.and_then(|desc| desc.spec))
-            .with_protocol(protocol);
+            .with_protocol(protocol)
+            .with_method(req.method());
         let mut result = Ok(());
         for interceptor in interceptors {
             result = interceptor.intercept_head(&mut head).await;
@@ -2235,6 +2236,7 @@ where
         .with_extensions(extensions)
         .with_spec(desc.spec)
         .with_protocol(Some(Protocol::Connect))
+        .with_method(Some(method))
         // The leading slash was stripped for the Dispatcher::lookup key;
         // restore it so RequestContext::path() matches http::Uri::path()
         // and Spec::procedure.
@@ -2491,6 +2493,7 @@ where
         .with_extensions(extensions)
         .with_spec(spec)
         .with_protocol(Some(protocol))
+        .with_method(Some(parts.method))
         .with_path(["/", path].concat())
         .with_decode_options(limits.decode_options());
 
@@ -2794,6 +2797,8 @@ where
         .with_extensions(extensions)
         .with_spec(method_desc.and_then(|d| d.spec))
         .with_protocol(Some(protocol))
+        // Streaming requests are POST-only; `handle_request` admits no other verb.
+        .with_method(Some(Method::POST))
         .with_path(["/", path].concat())
         .with_decode_options(limits.decode_options());
 
@@ -2917,6 +2922,8 @@ where
         .with_extensions(extensions)
         .with_spec(spec)
         .with_protocol(Some(protocol))
+        // Streaming requests are POST-only; `handle_request` admits no other verb.
+        .with_method(Some(Method::POST))
         .with_path(["/", path].concat())
         .with_decode_options(limits.decode_options());
 
@@ -3334,6 +3341,8 @@ where
         .with_extensions(extensions)
         .with_spec(spec)
         .with_protocol(Some(protocol))
+        // Streaming requests are POST-only; `handle_request` admits no other verb.
+        .with_method(Some(Method::POST))
         .with_path(["/", path].concat())
         .with_decode_options(limits.decode_options());
 
@@ -8052,5 +8061,63 @@ mod http_query_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(heads.load(Ordering::SeqCst), 1);
         assert_eq!(unaries.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn handlers_and_interceptors_observe_the_method() {
+        use std::sync::Mutex;
+        type Seen = Arc<Mutex<Vec<(&'static str, Option<String>)>>>;
+        struct Watch(Seen);
+        #[async_trait::async_trait]
+        impl Interceptor for Watch {
+            async fn intercept_head(
+                &self,
+                head: &mut crate::interceptor::RequestHead<'_>,
+            ) -> Result<(), ConnectError> {
+                let method = head.method().map(|m| m.as_str().to_owned());
+                self.0.lock().unwrap().push(("head", method));
+                Ok(())
+            }
+            async fn intercept_unary(
+                &self,
+                req: crate::interceptor::UnaryRequest,
+                next: crate::interceptor::Next<'_>,
+            ) -> Result<crate::interceptor::UnaryResponse, ConnectError> {
+                let method = req.ctx.method().map(|m| m.as_str().to_owned());
+                self.0.lock().unwrap().push(("unary", method));
+                next.run(req).await
+            }
+        }
+        let seen = Seen::default();
+        let handler_seen = Arc::clone(&seen);
+        let router = Router::new().route_idempotent(
+            "svc",
+            "Read",
+            handler_fn(move |ctx: RequestContext, req: StringValue| {
+                let method = ctx.method().map(|m| m.as_str().to_owned());
+                handler_seen.lock().unwrap().push(("handler", method));
+                async { crate::Response::ok(req) }
+            }),
+        );
+        let mut service = ConnectRpcService::new(router).with_interceptor(Watch(Arc::clone(&seen)));
+        for builder in [query(), Request::builder().method(Method::POST)] {
+            seen.lock().unwrap().clear();
+            let want = builder.method_ref().unwrap().as_str().to_owned();
+            let resp = send(
+                &mut service,
+                builder
+                    .uri("/svc/Read")
+                    .header(header::CONTENT_TYPE, "application/proto"),
+                proto_body("x"),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let got = seen.lock().unwrap().clone();
+            let want: Vec<_> = ["head", "unary", "handler"]
+                .into_iter()
+                .map(|stage| (stage, Some(want.clone())))
+                .collect();
+            assert_eq!(got, want);
+        }
     }
 }

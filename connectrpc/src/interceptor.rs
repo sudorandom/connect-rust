@@ -303,6 +303,7 @@ pub struct RequestHead<'a> {
     spec: Option<crate::spec::Spec>,
     headers: &'a HeaderMap,
     protocol: crate::Protocol,
+    method: Option<&'a http::Method>,
     extensions: &'a mut http::Extensions,
 }
 
@@ -326,8 +327,24 @@ impl<'a> RequestHead<'a> {
             spec: None,
             headers,
             protocol: crate::Protocol::Connect,
+            method: None,
             extensions,
         }
+    }
+
+    /// Set the HTTP method.
+    #[must_use]
+    pub fn with_method(mut self, method: &'a http::Method) -> Self {
+        self.method = Some(method);
+        self
+    }
+
+    /// The HTTP method the request arrived with, as
+    /// [`RequestContext::method`] reports it. `None` only for a head built
+    /// with [`new`](Self::new) and no [`with_method`](Self::with_method).
+    #[must_use]
+    pub const fn method(&self) -> Option<&'a http::Method> {
+        self.method
     }
 
     /// Set the static method metadata.

@@ -62,6 +62,8 @@ pub struct RequestContext {
     pub(crate) protocol: Option<crate::Protocol>,
     /// The procedure path the client requested, with a leading slash.
     pub(crate) path: Option<String>,
+    /// The HTTP method the request arrived with.
+    pub(crate) method: Option<http::Method>,
     /// Decode limits for this request's message, from the service's
     /// [`Limits`](crate::Limits). Default when the context was built outside
     /// the service (a hand-rolled test, a tower layer), which is why this is
@@ -79,6 +81,7 @@ impl RequestContext {
             spec: None,
             protocol: None,
             path: None,
+            method: None,
             decode_options: buffa::DecodeOptions::new(),
         }
     }
@@ -116,6 +119,13 @@ impl RequestContext {
     #[must_use]
     pub fn with_spec(mut self, spec: Option<crate::spec::Spec>) -> Self {
         self.spec = spec;
+        self
+    }
+
+    /// Attach the HTTP method the request arrived with.
+    #[must_use]
+    pub fn with_method(mut self, method: Option<http::Method>) -> Self {
+        self.method = method;
         self
     }
 
@@ -249,6 +259,16 @@ impl RequestContext {
     /// path (e.g. unit tests calling handlers directly).
     pub fn protocol(&self) -> Option<crate::Protocol> {
         self.protocol
+    }
+
+    /// The HTTP method the request arrived with: `POST`, `GET`, or `QUERY`
+    /// (RFC 10008) for a unary Connect request, and `POST` for every
+    /// streaming and gRPC request.
+    ///
+    /// Always present when constructed by the dispatch path; `None` only for
+    /// hand-built contexts.
+    pub fn method(&self) -> Option<&http::Method> {
+        self.method.as_ref()
     }
 
     /// The procedure path the client requested, `"/package.Service/Method"`.
